@@ -532,39 +532,6 @@ Sample Upload → Static Analysis → Dynamic Analysis → Report Generation
 - `ida_set_comment(address, comment)`
 - `ida_rename_function(function_address, new_name)`
 
-## Future Enhancements
-
-### Short-term (v0.2)
-- [ ] Memory dump analysis (MiniDumpWriteDump + analysis)
-- [ ] Sandbox integration (Cuckoo/ANY.run API)
-- [ ] Volatility 3 integration for memory forensics
-- [ ] Output file standardization (JSON reports)
-- [ ] Tool availability checking before execution
-
-### Mid-term (v0.3)
-- [ ] Batch processing API (analyze multiple samples)
-- [ ] Result caching and deduplication
-- [ ] Custom YARA rule execution
-- [ ] Binary diffing tool integration (Bindiff)
-- [ ] Ghidra integration as IDA Pro alternative
-- [ ] Improved error handling and retry logic
-- [ ] Progress streaming for long operations
-
-### Long-term (v0.4+)
-- [ ] Machine learning-based threat classification
-- [ ] Collaborative analysis workspace
-- [ ] Full CI/CD pipeline integration
-- [ ] Cloud-based FlareVM orchestration
-- [ ] Performance profiling and optimization
-- [ ] Advanced reporting and visualization
-- [ ] Integration with threat intelligence feeds
-
-### Research Directions
-- Multi-VM cluster analysis (distribute across multiple FlareVMs)
-- Automated exploit development assistance
-- Behavior pattern recognition and anomaly detection
-- Malware family clustering
-
 ## Troubleshooting
 
 ### Connection Issues
