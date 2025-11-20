@@ -1,0 +1,15 @@
+# FlareVM MCP Server Dependencies
+
+# MCP Framework
+mcp>=0.1.0
+fastmcp>=2.0.0
+
+# Windows Remote Management
+pywinrm>=0.4.3
+requests>=2.31.0
+
+# Credential Management
+keyring>=24.0.0
+
+# Utilities
+python-dotenv>=1.0.0
