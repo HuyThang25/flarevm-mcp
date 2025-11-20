@@ -7,7 +7,7 @@ A Model Context Protocol (MCP) server that provides remote access to Windows mal
 **FlareVM MCP** is a bridge between your analysis environment (typically Kali Linux) and an isolated Windows malware analysis VM (FlareVM). It exposes 40+ malware analysis tools through the MCP protocol, allowing:
 
 - **Remote file operations** - Upload/download samples and artifacts
-- **Static analysis** - Packer detection (DIE), capability analysis (CAPA), string extraction (FLOSS)
+- **Static analysis** - Packer detection (DIEC), capability analysis (CAPA), string extraction (FLOSS)
 - **Dynamic analysis** - Process monitoring, network surveillance, registry tracking
 - **Debuggers** - x64dbg scripting, WinDbg crash analysis
 - **Instrumentation** - Frida hooks for runtime API monitoring
@@ -125,7 +125,7 @@ A Model Context Protocol (MCP) server that provides remote access to Windows mal
   - Procmon (SysInternals)
   - x64dbg
   - WinDbg
-  - DIE (DetectItEasy)
+  - DIEC (DetectItEasy CLI)
   - FLOSS
   - CAPA
   - Frida for Windows
