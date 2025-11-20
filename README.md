@@ -1,6 +1,6 @@
 # FlareVM MCP Server
 
-A Model Context Protocol (MCP) server that provides remote access to Windows malware analysis tools on [FlareVM](https://github.com/mandiant/flare-vm) through a unified interface. This enables AI agents and security analysts to perform comprehensive malware analysis and reverse engineering tasks without manual tool interaction.
+A Model Context Protocol (MCP) server that provides remote access to Windows malware analysis tools on [FlareVM](https://github.com/mandiant/flare-vm) through a unified interface. This enables AI agents and security analysts to perform comprehensive malware analysis and reverse engineering tasks without manual tool interaction. This project is developed to enable agentic AI integration and ease file transfers to and from FlareVM while keeping it isolated.
 
 ## What is FlareVM MCP?
 
@@ -101,7 +101,7 @@ A Model Context Protocol (MCP) server that provides remote access to Windows mal
 - **`fakenet_start`** - Start FakeNet-NG network simulation
 - **`fakenet_stop`** - Stop FakeNet-NG and retrieve logs
 
-### IDA Pro Integration
+### IDA Pro Integration (Not built-in in FlareVM)
 - **`ida_get_metadata`** - Get metadata about loaded binary
 - **`ida_list_functions`** - List functions with pagination
 - **`ida_decompile_function`** - Decompile function to pseudocode
@@ -138,25 +138,19 @@ A Model Context Protocol (MCP) server that provides remote access to Windows mal
 
 ## Installation
 
-### 1. Prerequisites Setup
-
-```bash
-# Install required Python packages
-pip install pywinrm fastmcp keyring
-
-# Install smbclient for large file transfers
-sudo apt-get install smbclient
-
-# Verify Python version
-python3 --version  # Should be 3.10+
-```
-
-### 2. Clone Repository
+### 1. Clone Repository
 
 ```bash
 cd /home/kali
 git clone https://github.com/zixuantemp/flarevm-mcp.git
 cd flarevm-mcp
+```
+
+### 2. Install dependencies
+```bash
+# Requires Python > 3.10
+pip install -r requirements.txt
+sudo apt-get install smbclient
 ```
 
 ### 3. Configure Credentials
@@ -205,6 +199,10 @@ For use with Claude Code or other MCP clients, add to your MCP config:
     }
   }
 }
+```
+OR
+```bash
+claude mcp add flare-mcp python3 /path/to/server.py
 ```
 
 **For other MCP clients**, configure according to their documentation.
