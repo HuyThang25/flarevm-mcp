@@ -13,8 +13,6 @@ A Model Context Protocol (MCP) server that provides remote access to Windows mal
 - **Instrumentation** - Frida hooks for runtime API monitoring
 - **IDA Pro integration** - Decompilation and annotation via RPC
 
-## Important: This project is mostly vibe-coded, please use at your own risk!
-
 ### Architecture Overview
 
 ```
