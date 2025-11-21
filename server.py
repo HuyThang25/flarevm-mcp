@@ -14,8 +14,8 @@ import subprocess
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-FLAREVM_HOST = "192.168.100.10"
-FLAREVM_USER = "xtemp"
+FLAREVM_HOST = "FLAREVM_IP"
+FLAREVM_USER = "FLAREVM_USER"
 FLAREVM_PASSWORD = keyring.get_password("flarevm", FLAREVM_USER)
 
 if not FLAREVM_PASSWORD:
