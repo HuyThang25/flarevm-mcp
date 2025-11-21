@@ -159,8 +159,8 @@ python3 << 'EOF'
 import keyring
 
 # Configure based on your FlareVM setup
-FLAREVM_HOST = "192.168.100.10"  # Adjust to your VM IP
-FLAREVM_USER = "xtemp"            # Adjust to your username
+FLAREVM_HOST = "192.168.100.128"  # Adjust to your VM IP
+FLAREVM_USER = "USER"            # Adjust to your username
 FLAREVM_PASSWORD = "your_password" # Your password
 
 # Store password securely
@@ -244,8 +244,8 @@ python3 << 'EOF'
 import winrm
 
 session = winrm.Session(
-    "192.168.100.10",
-    auth=("xtemp", "password"),
+    "192.168.100.128",
+    auth=("USER", "password"),
     transport='plaintext'
 )
 
@@ -266,7 +266,7 @@ New-SmbShare -Name "KaliShare" -Path "C:\Share" -FullAccess "Everyone"
 
 2. Test from Kali:
 ```bash
-smbclient //192.168.100.10/KaliShare -U xtemp -c "ls"
+smbclient //192.168.100.128/KaliShare -U xtemp -c "ls"
 ```
 
 ### IDA Pro Integration
