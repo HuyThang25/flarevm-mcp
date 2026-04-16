@@ -703,5 +703,5 @@ For issues, questions, or suggestions:
 
 ---
 
-**Last Updated**: 2025-11-20
-**Version**: 0.1.0
+**Last Updated**: 2026-04-17
+**Version**: 1.0.0
