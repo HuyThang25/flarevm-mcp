@@ -129,8 +129,10 @@ async def run_ps_script(script, timeout=300, script_name="mcp_script.ps1"):
 
     remote_path = "C:\\temp\\" + script_name
 
-    # Stage locally
-    local_tmp = "/tmp/" + script_name
+    # Stage locally in a per-process tempdir (Bandit B108: not /tmp directly)
+    import tempfile
+    tmp_root = tempfile.mkdtemp(prefix="flarevm-mcp-")
+    local_tmp = os.path.join(tmp_root, script_name)
     with open(local_tmp, "w", encoding="utf-8") as f:
         f.write(script)
 
@@ -152,9 +154,10 @@ async def run_ps_script(script, timeout=300, script_name="mcp_script.ps1"):
     if code != 0:
         raise RuntimeError("Failed to move script into place: {}".format(stderr))
 
-    # Cleanup local copy
+    # Cleanup local copy + tempdir
+    import shutil
     try:
-        os.remove(local_tmp)
+        shutil.rmtree(tmp_root, ignore_errors=True)
     except OSError:
         pass
 
