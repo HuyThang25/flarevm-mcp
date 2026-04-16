@@ -35,3 +35,14 @@ Issues = "https://github.com/zixuantemp/flarevm-mcp/issues"
 
 [tool.setuptools]
 py-modules = ["server"]
+
+[tool.ruff]
+line-length = 200
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "B"]
+# Ignore line-too-long: server.py has many embedded PowerShell heredocs that
+# cannot be wrapped without breaking the script. Real bugs (F-rules) still flag.
+ignore = ["E501"]
+

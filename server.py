@@ -14,16 +14,14 @@ IDA Pro: Proxy to IDA MCP server on FlareVM (HTTP JSON-RPC port 13337)
 
 import asyncio
 import hashlib
-import ntpath
 import json
 import logging
+import ntpath
 import os
 import subprocess
 import sys
-import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
 
 import keyring
 import winrm
@@ -1253,7 +1251,8 @@ if (-not (Test-Path $p)) {{ Write-Error "File not found: $p"; exit 1 }}
 # 6. get_file_hash
 async def _handle_get_file_hash(args):
     file_path = args["file_path"]
-    algorithm = args.get("algorithm", "SHA256")
+    # Always compute MD5+SHA1+SHA256; the algorithm arg is accepted for compatibility
+    _ = args.get("algorithm", "SHA256")
     ps = """
 $path = "{path}"
 if (-not (Test-Path $path)) {{ Write-Error "File not found: $path"; exit 1 }}
@@ -1293,7 +1292,7 @@ async def _handle_take_screenshot(args):
     # Ensure temp directory exists
     await run_ps_async('New-Item -ItemType Directory -Path "C:\\temp" -Force | Out-Null', timeout=10)
     # Use nircmd via scheduled task for interactive session screenshot
-    result = await launch_gui_app(
+    await launch_gui_app(
         TOOL_PATHS["nircmd"],
         arguments='savescreenshot "{}"'.format(output_path),
         task_name="MCP_Screenshot",
@@ -1411,17 +1410,17 @@ async def _handle_strings_extract(args):
 
 
 # 14. entropy_analysis
-async def _handle_entropy_analysis(args):
-    file_path = args["file_path"]
-    ps = """
-$pyScript = @'
-import pefile, math, sys
+# The Python helper kept as a raw string so `{...}` placeholders inside it
+# are NOT interpreted by Python's str.format() (they're meant for the
+# embedded Python script's own .format() calls).
+_ENTROPY_PY = r"""import pefile, math, sys
 try:
     pe = pefile.PE(sys.argv[1])
     print("=== PE Section Entropy Analysis ===")
     print("File: " + sys.argv[1])
     print("")
-    print("{:8s} {:>10s} {:>10s} {:>8s} {:>6s}".format("Section", "VirtSize", "RawSize", "Entropy", "Status"))
+    print("{:8s} {:>10s} {:>10s} {:>8s} {:>6s}".format(
+        "Section", "VirtSize", "RawSize", "Entropy", "Status"))
     print("-" * 50)
     total_entropy = 0
     for s in pe.sections:
@@ -1432,9 +1431,10 @@ try:
                 p = data.count(bytes([i])) / len(data)
                 if p > 0:
                     ent -= p * math.log2(p)
-        name = s.Name.decode(errors='replace').strip('\\x00')
+        name = s.Name.decode(errors='replace').strip('\x00')
         status = "PACKED" if ent > 7.0 else ("HIGH" if ent > 6.5 else "OK")
-        print("{:8s} {:10d} {:10d} {:8.2f} {:>6s}".format(name, s.Misc_VirtualSize, s.SizeOfRawData, ent, status))
+        print("{:8s} {:10d} {:10d} {:8.2f} {:>6s}".format(
+            name, s.Misc_VirtualSize, s.SizeOfRawData, ent, status))
         total_entropy += ent
     avg = total_entropy / len(pe.sections) if pe.sections else 0
     print("")
@@ -1445,18 +1445,31 @@ try:
         print("VERDICT: Possibly packed or compressed sections")
     else:
         print("VERDICT: Likely NOT packed")
-    # Import count
     imports = 0
     if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
         for entry in pe.DIRECTORY_ENTRY_IMPORT:
             imports += len(entry.imports)
-    print("\\nImport count: {} {}".format(imports, "(suspiciously low - may be packed)" if imports < 10 else "(normal)"))
+    note = "(suspiciously low - may be packed)" if imports < 10 else "(normal)"
+    print("\nImport count: {} {}".format(imports, note))
 except Exception as e:
     print("Error: " + str(e))
-'@
-$pyScript | Out-File -FilePath C:\\temp\\entropy_check.py -Encoding utf8
-python C:\\temp\\entropy_check.py "{file_path}" 2>&1
-""".format(file_path=file_path.replace('"', '`"'))
+"""
+
+
+async def _handle_entropy_analysis(args):
+    file_path = args["file_path"]
+    # Upload the helper script to FlareVM, then run it
+    await run_ps_script(
+        # Wrap in a tiny PowerShell trampoline that writes the script and runs it
+        "Set-Content -Path C:\\temp\\entropy_check.py -Value @'\n"
+        + _ENTROPY_PY
+        + "'@ -Encoding utf8\n",
+        timeout=30,
+        script_name="entropy_setup.ps1",
+    )
+    safe_path = file_path.replace('"', '`"')
+    ps = 'New-Item -ItemType Directory -Path "C:\\temp" -Force | Out-Null; ' \
+         'python C:\\temp\\entropy_check.py "{}" 2>&1'.format(safe_path)
     stdout, stderr, code = await run_ps_async(ps, timeout=60)
     if code != 0:
         return _text("Entropy analysis failed: {} {}".format(stderr, stdout))
