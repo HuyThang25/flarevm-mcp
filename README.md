@@ -1,6 +1,71 @@
 # FlareVM MCP Server
 
+[![Tools](https://img.shields.io/badge/tools-48-blue)](#available-tools)
+[![Prompts](https://img.shields.io/badge/prompts-5-green)](#mcp-capabilities)
+[![Resources](https://img.shields.io/badge/resources-5-orange)](#mcp-capabilities)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-brightgreen)](pyproject.toml)
+
 A Model Context Protocol (MCP) server that provides remote access to Windows malware analysis tools on [FlareVM](https://github.com/mandiant/flare-vm) through a unified interface. This enables AI agents and security analysts to perform comprehensive malware analysis and reverse engineering tasks without manual tool interaction. This project is developed to enable agentic AI integration and ease file transfers to and from FlareVM while keeping it isolated.
+
+## Quick install
+
+Three supported installation paths:
+
+**One-line installer (Kali / Debian)**
+```bash
+curl -sSL https://raw.githubusercontent.com/zixuantemp/flarevm-mcp/main/install.sh | bash
+```
+Creates a venv at `~/.flarevm-mcp/venv`, installs the package, and stores
+your FlareVM password in the system keyring.
+
+**pip (any Linux / macOS / WSL)**
+```bash
+pip install git+https://github.com/zixuantemp/flarevm-mcp.git
+flarevm-mcp   # runs the MCP server on stdio
+```
+
+**Docker**
+```bash
+docker run -i --rm \
+    -e FLAREVM_HOST=192.168.100.10 \
+    -e FLAREVM_USER=xtemp \
+    -e FLAREVM_PASSWORD=infected \
+    ghcr.io/zixuantemp/flarevm-mcp
+```
+
+After install, register with your MCP client (`~/.claude/.mcp.json` or
+`claude_desktop_config.json`) — the installer prints a ready-to-paste snippet.
+
+## MCP capabilities
+
+This server implements the full MCP capability set:
+
+- **Tools (48)** — see [`resources/tools-reference.md`](resources/tools-reference.md).
+- **Prompts (5)** — pre-baked workflows for common tasks. See [`prompts/`](prompts/).
+  - `triage_unknown_sample`, `behavioral_analysis`, `unpack_workflow`,
+    `injection_hunt`, `persistence_audit_report`.
+- **Resources (5)** — live and static reference material:
+  - `flarevm://tools/inventory` — `Test-Path` every configured tool, live.
+  - `flarevm://config/fakenet-default` — generated FakeNet config.
+  - `flarevm://docs/yara-rules` — installed YARA rule listing + index.
+  - `flarevm://docs/cheatsheet` — common workflow recipes.
+  - `flarevm://status/connection` — live FlareVM health check.
+- **Skills (3)** — Claude Code skill bundles in [`skills/`](skills/):
+  `triage-malware-sample`, `incident-response-windows`, `automated-unpacking`.
+
+## Security
+
+Detonation runs inside a **disposable VM**, never on the analyst host. See
+[SECURITY.md](SECURITY.md) for the full threat model, credential handling
+rules, and how to report a vulnerability.
+
+## License
+
+[MIT](LICENSE) — Copyright (c) 2026 zixuantemp.
+
+---
+
 
 ## What is FlareVM MCP?
 

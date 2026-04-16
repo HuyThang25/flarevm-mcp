@@ -1,0 +1,34 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e .
+      - run: python -c "import server; print('Server imports OK')"
+      - run: python -m py_compile server.py
+      - name: MCP handshake test
+        run: |
+          python -c "
+          import asyncio, server
+          tools = asyncio.run(server.list_tools())
+          assert len(tools) >= 48, f'Expected 48+ tools, got {len(tools)}'
+          print(f'OK {len(tools)} tools registered')
+          "
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff bandit
+      - run: ruff check --select E,F,B server.py
+      - run: bandit -r server.py -ll
