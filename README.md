@@ -14,7 +14,7 @@ Three supported installation paths:
 
 **One-line installer (Kali / Debian)**
 ```bash
-curl -sSL https://raw.githubusercontent.com/zixuantemp/flarevm-mcp/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/HuyThang25/flarevm-mcp/refs/heads/main/install.sh | bash
 ```
 Creates a venv at `~/.flarevm-mcp/venv`, installs the package, and stores
 your FlareVM password in the system keyring.
