@@ -56,18 +56,38 @@ TOOL_PATHS = {
     "die": "C:\\Tools\\die\\diec.exe",
     "floss": "C:\\Tools\\FLOSS\\floss.exe",
     "capa": "C:\\Tools\\capa\\capa.exe",
-    "yara": "C:\\Tools\\yara\\yara64.exe",
-    "procmon": "C:\\Tools\\sysinternals\\Procmon.exe",
+    "yara": "C:\\ProgramData\\chocolatey\\bin\\yara64.exe",
+    "procmon": "C:\\Tools\\ProcessMonitor\\Procmon64.exe",
     "autorunsc": "C:\\Tools\\sysinternals\\autorunsc.exe",
-    "strings": "C:\\Tools\\sysinternals\\strings.exe",
-    "pe_sieve": "C:\\Tools\\pe-sieve\\pe-sieve64.exe",
-    "hollows_hunter": "C:\\Tools\\hollows_hunter\\hollows_hunter64.exe",
-    "upx": "C:\\Tools\\upx\\upx.exe",
+    "strings": "C:\\Tools\\cygwin\\bin\\strings.exe",
+    "pe_sieve": "C:\\ProgramData\\chocolatey\\bin\\pe-sieve.exe",
+    "hollows_hunter": "C:\\Tools\\hollows_hunter\\hollows_hunter.exe",
+    "upx": "C:\\Tools\\Explorer Suite\\Extensions\\CFF Explorer\\UPX Utility\\upx.exe",
     "dnspy": "C:\\Tools\\dnSpy\\dnSpy.Console.exe",
-    "fakenet": "C:\\Tools\\fakenet\\fakenet.exe",
+    "fakenet": "C:\\Tools\\fakenet\\fakenet3.5\\fakenet.exe",
     "nircmd": "C:\\Tools\\nircmd.exe",
-    "x64dbg": "C:\\ProgramData\\chocolatey\\bin\\x64dbg.exe",
+    "x64dbg": "C:\\Tools\\x64dbg\\release\\x64\\x64dbg.exe",
     "tshark": "C:\\ProgramData\\chocolatey\\bin\\tshark.exe",
+}
+
+YARA_RULES_PATH = "C:\\Tools\\die\\yara_rules"
+
+TOOL_EXECUTABLES = {
+    "die": ["diec.exe", "die.exe"],
+    "floss": ["floss.exe"],
+    "capa": ["capa.exe"],
+    "yara": ["yara64.exe", "yara.exe"],
+    "procmon": ["Procmon.exe", "Procmon64.exe"],
+    "autorunsc": ["autorunsc.exe", "autorunsc64.exe"],
+    "strings": ["strings.exe", "strings64.exe"],
+    "pe_sieve": ["pe-sieve64.exe", "pe-sieve.exe"],
+    "hollows_hunter": ["hollows_hunter64.exe", "hollows_hunter.exe"],
+    "upx": ["upx.exe"],
+    "dnspy": ["dnSpy.Console.exe", "dnSpy.exe"],
+    "fakenet": ["fakenet.exe", "FakeNet-NG.exe"],
+    "nircmd": ["nircmd.exe"],
+    "x64dbg": ["x64dbg.exe", "x32dbg.exe"],
+    "tshark": ["tshark.exe"],
 }
 
 LOG = logging.getLogger("flarevm-mcp")
@@ -176,10 +196,10 @@ async def ida_rpc_call(method, params=None):
     payload = {"jsonrpc": "2.0", "method": method, "id": 1}
     if params:
         payload["params"] = params
-    payload_json = json.dumps(payload).replace('"', '\\"')
+    payload_json = json.dumps(payload)
     ps = (
-        '$body = "{}"\n'
-        "$resp = Invoke-WebRequest -Uri 'http://127.0.0.1:{}/jsonrpc' "
+        "$body = @'\n{}\n'@\n"
+        "$resp = Invoke-WebRequest -Uri 'http://127.0.0.1:{}/mcp' "
         "-Method POST -ContentType 'application/json' -Body $body -UseBasicParsing\n"
         "$resp.Content"
     ).format(payload_json, IDA_MCP_PORT)
@@ -350,16 +370,49 @@ Listener: IRCListener
 # ---------------------------------------------------------------------------
 
 async def resolve_tool_path(tool_key, fallback_name=None):
-    """Find a tool on FlareVM. Check known path first, then where.exe."""
+    r"""Find a tool on FlareVM.
+
+    Check the configured path first, then PATH, then recursively search C:\Tools.
+    FlareVM installs are not consistent about directory names, so the recursive
+    fallback is intentionally based on executable names rather than folders.
+    """
     known = TOOL_PATHS.get(tool_key)
+    names = list(TOOL_EXECUTABLES.get(tool_key, []))
+    if fallback_name:
+        fallback_exe = fallback_name if fallback_name.lower().endswith(".exe") else fallback_name + ".exe"
+        if fallback_exe not in names:
+            names.append(fallback_exe)
+    names_literal = "@(" + ",".join("'{}'".format(n.replace("'", "''")) for n in names) + ")"
     if known:
-        ps = 'if (Test-Path "{}") {{ Write-Output "{}" }} else {{ $p = (where.exe {} 2>$null | Select-Object -First 1); if ($p) {{ Write-Output $p }} else {{ Write-Output "NOT_FOUND" }} }}'.format(
-            known, known, fallback_name or tool_key
-        )
+        ps = """
+$known = "{known}"
+$names = {names}
+if (Test-Path $known) {{ Write-Output $known; exit 0 }}
+foreach ($name in $names) {{
+    $p = where.exe $name 2>$null | Select-Object -First 1
+    if ($p) {{ Write-Output $p; exit 0 }}
+}}
+foreach ($name in $names) {{
+    $p = Get-ChildItem -Path "C:\\Tools" -Filter $name -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($p) {{ Write-Output $p; exit 0 }}
+}}
+Write-Output "NOT_FOUND"
+""".format(known=known.replace('"', '`"'), names=names_literal)
     else:
-        ps = '$p = (where.exe {} 2>$null | Select-Object -First 1); if ($p) {{ Write-Output $p }} else {{ Write-Output "NOT_FOUND" }}'.format(
-            fallback_name or tool_key
-        )
+        ps = """
+$names = {names}
+foreach ($name in $names) {{
+    $p = where.exe $name 2>$null | Select-Object -First 1
+    if ($p) {{ Write-Output $p; exit 0 }}
+}}
+foreach ($name in $names) {{
+    $p = Get-ChildItem -Path "C:\\Tools" -Filter $name -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($p) {{ Write-Output $p; exit 0 }}
+}}
+Write-Output "NOT_FOUND"
+""".format(names=names_literal)
     stdout, _, _ = await run_ps_async(ps, timeout=15)
     path = stdout.strip().split("\n")[0].strip() if stdout.strip() else "NOT_FOUND"
     if path == "NOT_FOUND":
@@ -516,7 +569,7 @@ async def list_tools():
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Path to file on FlareVM"},
-                    "rules_path": {"type": "string", "description": "Path to YARA rules (default C:\\Tools\\yara\\rules\\)", "default": "C:\\Tools\\yara\\rules\\"},
+                    "rules_path": {"type": "string", "description": "Path to YARA rules", "default": YARA_RULES_PATH},
                 },
                 "required": ["file_path"],
             },
@@ -835,6 +888,7 @@ async def list_tools():
                 "type": "object",
                 "properties": {
                     "filter": {"type": "string", "description": "Optional name filter", "default": ""},
+                    "offset": {"type": "integer", "description": "Pagination offset", "default": 0},
                     "count": {"type": "integer", "description": "Max functions to return", "default": 100},
                 },
                 "required": [],
@@ -869,6 +923,7 @@ async def list_tools():
                 "type": "object",
                 "properties": {
                     "filter": {"type": "string", "description": "Optional string filter (regex)", "default": ""},
+                    "offset": {"type": "integer", "description": "Pagination offset", "default": 0},
                     "count": {"type": "integer", "description": "Max strings to return", "default": 200},
                 },
                 "required": [],
@@ -1358,18 +1413,39 @@ async def _handle_capa_analyze(args):
 # 12. yara_scan
 async def _handle_yara_scan(args):
     file_path = args["file_path"]
-    rules_path = args.get("rules_path", "C:\\Tools\\yara\\rules\\")
-    # Find YARA executable
-    ps_find = """
-$paths = @("C:\\Tools\\yara\\yara64.exe", "C:\\ProgramData\\chocolatey\\bin\\yara64.exe")
-foreach ($p in $paths) { if (Test-Path $p) { Write-Output $p; exit 0 } }
-$w = where.exe yara64 2>$null | Select-Object -First 1
-if ($w) { Write-Output $w } else { Write-Output "NOT_FOUND" }
-"""
-    yara_stdout, _, _ = await run_ps_async(ps_find, timeout=15)
-    yara_path = yara_stdout.strip().split("\n")[0].strip()
-    if yara_path == "NOT_FOUND":
+    rules_path = args.get("rules_path", YARA_RULES_PATH)
+    try:
+        yara_path = await resolve_tool_path("yara", "yara64")
+    except FileNotFoundError:
         return _text("YARA not found on FlareVM")
+
+    if not rules_path:
+        ps_rules = """
+$candidates = @(
+    "{default_rules}",
+    "C:\\Tools\\yara\\rules",
+    "C:\\Tools\\yara-rules",
+    "C:\\Tools\\YARA\\rules",
+    "C:\\Tools\\YaraRules"
+)
+foreach ($p in $candidates) {
+    if ((Test-Path $p) -and (Get-ChildItem -Path $p -Include *.yar,*.yara -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+        Write-Output $p
+        exit 0
+    }
+}
+$p = Get-ChildItem -Path "C:\\Tools" -Directory -Recurse -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.Name -match "yara|rule" -and
+        (Get-ChildItem -Path $_.FullName -Include *.yar,*.yara -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    } |
+    Select-Object -First 1 -ExpandProperty FullName
+if ($p) { Write-Output $p } else { Write-Output "NOT_FOUND" }
+""".format(default_rules=YARA_RULES_PATH.replace('"', '`"'))
+        rules_stdout, _, _ = await run_ps_async(ps_rules, timeout=30)
+        rules_path = rules_stdout.strip().split("\n")[0].strip()
+        if rules_path == "NOT_FOUND":
+            return _text("YARA rules directory not found under C:\\Tools")
 
     ps = '& "{yara}" -r "{rules}" "{file}" 2>&1'.format(
         yara=yara_path,
@@ -1393,17 +1469,29 @@ async def _handle_strings_extract(args):
     min_length = args.get("min_length", 6)
     encoding = args.get("encoding", "b")
     strings_path = await resolve_tool_path("strings", "strings")
-    enc_flag = ""
-    if encoding == "a":
-        enc_flag = "-a"
-    elif encoding == "u":
-        enc_flag = "-u"
-    else:
-        enc_flag = ""  # default is both in Sysinternals strings
+    safe_path = file_path.replace('"', '`"')
+    safe_strings = strings_path.replace('"', '`"')
 
-    ps = '& "{}" -accepteula -n {} {} "{}" 2>&1'.format(
-        strings_path, min_length, enc_flag, file_path.replace('"', '`"')
-    )
+    if "\\cygwin\\" in strings_path.lower():
+        if encoding == "u":
+            ps = '& "{}" -a -n {} -e l "{}" 2>&1'.format(safe_strings, min_length, safe_path)
+        elif encoding == "a":
+            ps = '& "{}" -a -n {} "{}" 2>&1'.format(safe_strings, min_length, safe_path)
+        else:
+            ps = (
+                '& "{}" -a -n {} "{}" 2>&1; '
+                '& "{}" -a -n {} -e l "{}" 2>&1'
+            ).format(safe_strings, min_length, safe_path, safe_strings, min_length, safe_path)
+    else:
+        enc_flag = ""
+        if encoding == "a":
+            enc_flag = "-a"
+        elif encoding == "u":
+            enc_flag = "-u"
+
+        ps = '& "{}" -accepteula -n {} {} "{}" 2>&1'.format(
+            safe_strings, min_length, enc_flag, safe_path
+        )
     stdout, stderr, code = await run_ps_async(ps, timeout=60)
     lines = stdout.split("\n") if stdout else []
     result = "=== Strings Extraction ===\nFile: {}\nTotal strings found: {}\n\n{}".format(
@@ -2476,10 +2564,45 @@ Write-Output "Total decompiled files: $totalFiles"
 # 36. ida_launch_and_wait
 async def _handle_ida_launch_and_wait(args):
     binary_path = args["binary_path"]
-    ida_path = args.get("ida_path", "C:\\Tools\\IDA Pro\\ida64.exe")
+    ida_path = args.get("ida_path", "")
+
+    # Resolve IDA automatically because FLARE-VM package paths vary by version.
+    ps_find = """
+$paths = @(
+    "{ida}",
+    "C:\\Tools\\IDA Professional 9.1\\ida64.exe",
+    "C:\\Tools\\IDA Professional 9.1\\ida.exe",
+    "C:\\Tools\\IDA Professional\\ida64.exe",
+    "C:\\Tools\\IDA Professional\\ida.exe",
+    "C:\\Tools\\IDA Pro\\ida64.exe",
+    "C:\\Tools\\IDA Pro\\ida.exe",
+    "C:\\Program Files\\IDA Professional 9.1\\ida64.exe",
+    "C:\\Program Files\\IDA Professional 9.1\\ida.exe",
+    "C:\\Program Files\\IDA Pro\\ida64.exe",
+    "C:\\Program Files\\IDA Pro\\ida.exe"
+)
+foreach ($p in $paths) {{ if ($p -and (Test-Path $p)) {{ Write-Output $p; exit 0 }} }}
+$roots = @("C:\\Tools", "C:\\Program Files")
+foreach ($root in $roots) {{
+    if (Test-Path $root) {{
+        $found = Get-ChildItem -Path $root -Recurse -Include ida64.exe,ida.exe -File -ErrorAction SilentlyContinue |
+            Sort-Object @{{ Expression = {{ if ($_.Name -eq "ida64.exe") {{ 0 }} else {{ 1 }} }} }}, FullName |
+            Select-Object -First 1
+        if ($found) {{ Write-Output $found.FullName; exit 0 }}
+    }}
+}}
+$w = where.exe ida64 2>$null | Select-Object -First 1
+if ($w) {{ Write-Output $w; exit 0 }}
+$w = where.exe ida 2>$null | Select-Object -First 1
+if ($w) {{ Write-Output $w }} else {{ Write-Output "NOT_FOUND" }}
+""".format(ida=ida_path.replace('"', '`"'))
+    stdout, _, _ = await run_ps_async(ps_find, timeout=15)
+    actual_path = stdout.strip().split("\n")[0].strip()
+    if actual_path == "NOT_FOUND":
+        return _text("IDA Pro not found on FlareVM. Pass ida_path explicitly.")
 
     result = await launch_gui_app(
-        ida_path,
+        actual_path,
         arguments='"{}"'.format(binary_path),
         task_name="MCP_IDA",
         wait_port=IDA_MCP_PORT,
@@ -2495,8 +2618,8 @@ async def _handle_ida_launch_and_wait(args):
     except Exception as e:
         metadata = "\nNote: Could not fetch metadata yet: " + str(e)
 
-    return _text("=== IDA Pro Launched ===\nBinary: {}\n{}\n{}".format(
-        binary_path, result, metadata
+    return _text("=== IDA Pro Launched ===\nIDA: {}\nBinary: {}\n{}\n{}".format(
+        actual_path, binary_path, result, metadata
     ))
 
 
@@ -2539,14 +2662,21 @@ async def _handle_ida_get_metadata(args):
 
 # 39. ida_list_functions
 async def _handle_ida_list_functions(args):
-    params = {}
+    params = {"offset": args.get("offset", 0)}
     if args.get("filter"):
         params["filter"] = args["filter"]
     if args.get("count"):
         params["count"] = args["count"]
+    else:
+        params["count"] = 100
     result = await ida_rpc_call("list_functions", params if params else None)
     if "result" in result:
         funcs = result["result"]
+        if isinstance(funcs, dict) and isinstance(funcs.get("data"), list):
+            next_offset = funcs.get("next_offset")
+            funcs = funcs["data"]
+        else:
+            next_offset = None
         if isinstance(funcs, list):
             lines = ["=== IDA Functions ({} found) ===".format(len(funcs)), ""]
             for f in funcs:
@@ -2556,6 +2686,9 @@ async def _handle_ida_list_functions(args):
                     ))
                 else:
                     lines.append("  " + str(f))
+            if next_offset is not None:
+                lines.append("")
+                lines.append("Next offset: {}".format(next_offset))
             return _text("\n".join(lines))
         return _text(json.dumps(funcs, indent=2))
     return _text("IDA RPC response: " + json.dumps(result, indent=2))
@@ -2583,21 +2716,33 @@ async def _handle_ida_disassemble_function(args):
 
 # 42. ida_list_strings
 async def _handle_ida_list_strings(args):
-    params = {}
+    params = {"offset": args.get("offset", 0)}
     if args.get("filter"):
         params["filter"] = args["filter"]
     if args.get("count"):
         params["count"] = args["count"]
+    else:
+        params["count"] = 100
     result = await ida_rpc_call("list_strings", params if params else None)
     if "result" in result:
         strings = result["result"]
+        if isinstance(strings, dict) and isinstance(strings.get("data"), list):
+            next_offset = strings.get("next_offset")
+            strings = strings["data"]
+        else:
+            next_offset = None
         if isinstance(strings, list):
             lines = ["=== IDA Strings ({} found) ===".format(len(strings)), ""]
             for s in strings:
                 if isinstance(s, dict):
-                    lines.append("  {}: {}".format(s.get("address", "?"), s.get("value", "?")))
+                    lines.append("  {}: {}".format(
+                        s.get("address", "?"), s.get("value", s.get("string", "?"))
+                    ))
                 else:
                     lines.append("  " + str(s))
+            if next_offset is not None:
+                lines.append("")
+                lines.append("Next offset: {}".format(next_offset))
             return _text("\n".join(lines))
         return _text(json.dumps(strings, indent=2))
     return _text("IDA RPC response: " + json.dumps(result, indent=2))
