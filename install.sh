@@ -8,7 +8,7 @@ echo "[*] FlareVM MCP installer"
 if ! command -v python3 >/dev/null; then echo "Python 3.10+ required"; exit 1; fi
 
 # 2. Create venv (or use existing)
-VENV="${VENV:-/home/$USER/.flarevm-mcp/venv}"
+VENV="${VENV:-$HOME/.flarevm-mcp/venv}"
 mkdir -p "$(dirname "$VENV")"
 [ -d "$VENV" ] || python3 -m venv "$VENV"
 "$VENV/bin/pip" install --quiet --upgrade pip
