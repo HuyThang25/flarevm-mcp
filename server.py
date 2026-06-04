@@ -97,7 +97,7 @@ def get_session():
         _session = winrm.Session(
             FLAREVM_HOST,
             auth=(FLAREVM_USER, _get_password()),
-            transport="plaintext",
+            transport="ntlm",
         )
     return _session
 
