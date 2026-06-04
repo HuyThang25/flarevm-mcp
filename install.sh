@@ -4,21 +4,28 @@ set -e
 
 echo "[*] FlareVM MCP installer"
 
+echo "[*] Check Python"
 # 1. Check Python
 if ! command -v python3 >/dev/null; then echo "Python 3.10+ required"; exit 1; fi
-echo "[*] Check python done"
+echo "[*] Done !!!!"
+
+echo "[*] Check pip"
 # 2. Create venv (or use existing)
 VENV="${VENV:-$HOME/.flarevm-mcp/venv}"
 mkdir -p "$(dirname "$VENV")"
 [ -d "$VENV" ] || python3 -m venv "$VENV"
 "$VENV/bin/pip" install --quiet --upgrade pip
 "$VENV/bin/pip" install --quiet -e .
-echo "[*] Check pip done"
+echo "[*] Done !!!!"
+
+echo "[*] Check SMB"
 # 3. Check smbclient
 command -v smbclient >/dev/null || {
     echo "[!] smbclient missing - install with: sudo apt install smbclient"
 }
-echo "[*] Check smb done"
+echo "[*] Done !!!!"
+
+echo "[*] Import credential"
 # 4. Prompt for FlareVM credentials -> keyring
 echo
 echo "Enter FlareVM credentials (stored in system keyring):"
@@ -26,8 +33,7 @@ read -p "  FlareVM IP [192.168.100.10]: " IP; IP=${IP:-192.168.100.10}
 read -p "  FlareVM user [xtemp]: " USER_; USER_=${USER_:-xtemp}
 read -sp "  FlareVM password: " PW; echo
 "$VENV/bin/python" -c "import keyring; keyring.set_password('flarevm', '$USER_', '$PW')"
-
-echo "[*] Import credential done"
+echo "[*] Done !!!!"
 # 5. Generate MCP config snippet
 cat <<EOF
 
