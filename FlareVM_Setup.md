@@ -9,7 +9,7 @@ ida-pro-mcp --install
 ```
 Replace code in `C:\Python313\Lib\site-packages\ida_pro_mcp\mcp-plugin.py` to auto start ida
 From
-```
+```py
       def init(self):
           self.server = Server()
           hotkey = MCP.wanted_hotkey.replace("-", "+")
@@ -19,7 +19,7 @@ From
 
 ```
 To
-```
+```py
       def init(self):
           self.server = Server()
           hotkey = MCP.wanted_hotkey.replace("-", "+")
@@ -49,3 +49,5 @@ Insall module pefile
 pip install pefile
 ```
 
+Setup yara rule
+https://github.com/HuyThang25/flarevm-mcp/blob/main/resources/yara-rules-index.md
