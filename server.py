@@ -78,7 +78,7 @@ TOOL_PATHS = {
 YARA_RULES_PATH = "C:\\Tools\\yara_rules"
 
 TOOL_EXECUTABLES = {
-    "die": ["diec.exe", "die.exe"],
+    "die": ["diec.exe"],
     "floss": ["floss.exe"],
     "capa": ["capa.exe"],
     "yara": ["yara64.exe", "yara.exe"],
