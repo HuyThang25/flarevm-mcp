@@ -1,6 +1,6 @@
 # YARA Rules Index
 
-Default rules directory on FlareVM: `C:\Tools\yara\rules\`
+Default rules directory on FlareVM: `C:\Tools\yara_rules\`
 
 ## Recommended rule sources
 
@@ -27,7 +27,7 @@ Default rules directory on FlareVM: `C:\Tools\yara\rules\`
 ```
 yara_scan(
     file_path="C:\\temp\\sample.bin",
-    rules_dir="C:\\Tools\\yara\\rules"
+    rules_dir="C:\\Tools\\yara_rules"
 )
 ```
 
@@ -36,7 +36,7 @@ Returns list of rule matches with strings and metadata.
 ## Updating rules
 
 ```powershell
-cd C:\Tools\yara\rules
+cd C:\Tools\yara_rules
 git clone https://github.com/Neo23x0/signature-base
 git clone https://github.com/Yara-Rules/rules yararules
 ```
