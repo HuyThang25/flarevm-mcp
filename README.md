@@ -10,7 +10,6 @@ A Model Context Protocol (MCP) server that provides remote access to Windows mal
 
 ## Quick install
 
-Three supported installation paths:
 
 **One-line installer (Kali / Debian)**
 ```bash
@@ -19,20 +18,6 @@ curl -sSL https://raw.githubusercontent.com/HuyThang25/flarevm-mcp/refs/heads/ma
 Creates a venv at `~/.flarevm-mcp/venv`, installs the package, and stores
 your FlareVM password in the system keyring.
 
-**pip (any Linux / macOS / WSL)**
-```bash
-pip install git+https://github.com/zixuantemp/flarevm-mcp.git
-flarevm-mcp   # runs the MCP server on stdio
-```
-
-**Docker**
-```bash
-docker run -i --rm \
-    -e FLAREVM_HOST=192.168.100.10 \
-    -e FLAREVM_USER=xtemp \
-    -e FLAREVM_PASSWORD=infected \
-    ghcr.io/zixuantemp/flarevm-mcp
-```
 
 After install, register with your MCP client (`~/.claude/.mcp.json` or
 `claude_desktop_config.json`) — the installer prints a ready-to-paste snippet.
