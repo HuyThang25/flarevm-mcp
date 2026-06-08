@@ -7,7 +7,7 @@ Runs on Kali Linux. Exposes 48 tools to Claude Code for malware analysis.
 
 Transport: MCP stdio (stdin/stdout)
 Control: WinRM (pywinrm, plaintext transport)
-File transfer: SMB only (//FlareVM/KaliShare -> C:\Share)
+File transfer: SMB only (//FlareVM/C$ -> C:\temp staging)
 GUI tools: Windows Scheduled Tasks for interactive session
 IDA Pro: Proxy to IDA MCP server on FlareVM (HTTP JSON-RPC port 13337)
 """
@@ -20,7 +20,10 @@ import ntpath
 import os
 import subprocess
 import sys
+import time
 import traceback
+from requests.exceptions import RequestException
+from winrm.exceptions import WinRMError
 from concurrent.futures import ThreadPoolExecutor
 
 import keyring
@@ -46,9 +49,9 @@ FLAREVM_HOST = os.environ.get("FLAREVM_HOST", "192.168.100.10")
 FLAREVM_USER = os.environ.get("FLAREVM_USER", "xtemp")
 FLAREVM_PASSWORD = None  # loaded lazily from keyring or FLAREVM_PASSWORD env
 
-SMB_SHARE_NAME = os.environ.get("FLAREVM_SMB_SHARE", "KaliShare")
+SMB_SHARE_NAME = os.environ.get("FLAREVM_SMB_SHARE", "C$")
 SMB_SHARE_PATH = "//{}/{}".format(FLAREVM_HOST, SMB_SHARE_NAME)
-SMB_LOCAL_PATH = os.environ.get("FLAREVM_SMB_LOCAL_PATH", "C:\\Share")
+SMB_LOCAL_PATH = os.environ.get("FLAREVM_SMB_LOCAL_PATH", "C:\\temp")
 
 IDA_MCP_PORT = 13337
 
@@ -61,16 +64,18 @@ TOOL_PATHS = {
     "autorunsc": "C:\\Tools\\sysinternals\\autorunsc.exe",
     "strings": "C:\\Tools\\cygwin\\bin\\strings.exe",
     "pe_sieve": "C:\\ProgramData\\chocolatey\\bin\\pe-sieve.exe",
-    "hollows_hunter": "C:\\Tools\\hollows_hunter\\hollows_hunter.exe",
-    "upx": "C:\\Tools\\Explorer Suite\\Extensions\\CFF Explorer\\UPX Utility\\upx.exe",
+    "hollows_hunter": "C:\\Tools\\hollows_hunter\\hollows_hunter64.exe",
+    "upx": "C:\\ProgramData\\chocolatey\\bin\\upx.exe",
     "dnspy": "C:\\Tools\\dnSpy\\dnSpy.Console.exe",
     "fakenet": "C:\\Tools\\fakenet\\fakenet3.5\\fakenet.exe",
+    "frida": "C:\\Python313\\Scripts\\frida.exe",
+    "frida_ps": "C:\\Python313\\Scripts\\frida-ps.exe",
     "nircmd": "C:\\Tools\\nircmd.exe",
-    "x64dbg": "C:\\Tools\\x64dbg\\release\\x64\\x64dbg.exe",
+    "x64dbg": "C:\\ProgramData\\chocolatey\\bin\\x64dbg.exe",
     "tshark": "C:\\ProgramData\\chocolatey\\bin\\tshark.exe",
 }
 
-YARA_RULES_PATH = "C:\\Tools\\die\\yara_rules"
+YARA_RULES_PATH = "C:\\Tools\\yara_rules"
 
 TOOL_EXECUTABLES = {
     "die": ["diec.exe", "die.exe"],
@@ -85,6 +90,8 @@ TOOL_EXECUTABLES = {
     "upx": ["upx.exe"],
     "dnspy": ["dnSpy.Console.exe", "dnSpy.exe"],
     "fakenet": ["fakenet.exe", "FakeNet-NG.exe"],
+    "frida": ["frida.exe"],
+    "frida_ps": ["frida-ps.exe"],
     "nircmd": ["nircmd.exe"],
     "x64dbg": ["x64dbg.exe", "x32dbg.exe"],
     "tshark": ["tshark.exe"],
@@ -100,6 +107,7 @@ executor = ThreadPoolExecutor(max_workers=4)
 # ---------------------------------------------------------------------------
 
 _session = None
+_session_timeouts = None
 
 
 def _get_password():
@@ -111,21 +119,52 @@ def _get_password():
     return FLAREVM_PASSWORD
 
 
-def get_session():
-    global _session
-    if _session is None:
+def _winrm_timeouts(timeout):
+    """Map a tool timeout to pywinrm operation/read timeouts.
+
+    pywinrm has two separate timeouts. The read timeout must be greater than
+    the WSMan operation timeout, otherwise long-running tools can leave the
+    cached shell/session in a bad state for later calls.
+    """
+    try:
+        requested = int(timeout)
+    except (TypeError, ValueError):
+        requested = 120
+    requested = max(15, requested)
+    operation_timeout = min(max(10, requested - 10), requested)
+    read_timeout = max(requested + 30, operation_timeout + 20)
+    return operation_timeout, read_timeout
+
+
+def reset_session():
+    global _session, _session_timeouts
+    _session = None
+    _session_timeouts = None
+
+
+def get_session(timeout=120):
+    global _session, _session_timeouts
+    timeouts = _winrm_timeouts(timeout)
+    if _session is None or _session_timeouts != timeouts:
         _session = winrm.Session(
             FLAREVM_HOST,
             auth=(FLAREVM_USER, _get_password()),
             transport="ntlm",
+            operation_timeout_sec=timeouts[0],
+            read_timeout_sec=timeouts[1],
         )
+        _session_timeouts = timeouts
     return _session
 
 
 def run_ps(command, timeout=120):
     """Run PowerShell command via WinRM synchronously. Returns (stdout, stderr, status_code)."""
-    sess = get_session()
-    result = sess.run_ps(command)
+    sess = get_session(timeout=timeout)
+    try:
+        result = sess.run_ps(command)
+    except (RequestException, WinRMError):
+        reset_session()
+        raise
     stdout = result.std_out.decode("utf-8", errors="replace").strip()
     stderr = result.std_err.decode("utf-8", errors="replace").strip()
     return stdout, stderr, result.status_code
@@ -135,6 +174,36 @@ async def run_ps_async(command, timeout=120):
     """Run PowerShell via WinRM asynchronously using ThreadPoolExecutor."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, lambda: run_ps(command, timeout))
+
+
+def smb_relative_path(windows_path):
+    """Return a path relative to the configured SMB share for smbclient."""
+    path = windows_path.replace("/", "\\")
+    share = SMB_SHARE_NAME.strip()
+
+    if len(share) == 2 and share[1] == "$":
+        drive = share[0].upper() + ":"
+        if path.upper().startswith(drive + "\\"):
+            path = path[len(drive) + 1:]
+        elif path.upper() == drive:
+            path = ""
+    else:
+        root = SMB_LOCAL_PATH.replace("/", "\\").rstrip("\\")
+        if path.upper().startswith(root.upper() + "\\"):
+            path = path[len(root) + 1:]
+        elif path.upper() == root.upper():
+            path = ""
+
+    return path.strip("\\").replace("\\", "/")
+
+
+async def ensure_smb_stage_dir(timeout=30):
+    ps = 'New-Item -ItemType Directory -Path "{}" -Force | Out-Null'.format(
+        SMB_LOCAL_PATH.replace('"', '`"')
+    )
+    stdout, stderr, code = await run_ps_async(ps, timeout=timeout)
+    if code != 0:
+        raise RuntimeError("Failed to create SMB staging directory: {} {}".format(stderr, stdout))
 
 
 async def run_ps_script(script, timeout=300, script_name="mcp_script.ps1"):
@@ -147,7 +216,7 @@ async def run_ps_script(script, timeout=300, script_name="mcp_script.ps1"):
     if len(script) < 4000:
         return await run_ps_async(script, timeout=timeout)
 
-    remote_path = "C:\\temp\\" + script_name
+    remote_path = ntpath.join(SMB_LOCAL_PATH, script_name)
 
     # Stage locally in a per-process tempdir (Bandit B108: not /tmp directly)
     import tempfile
@@ -156,23 +225,18 @@ async def run_ps_script(script, timeout=300, script_name="mcp_script.ps1"):
     with open(local_tmp, "w", encoding="utf-8") as f:
         f.write(script)
 
-    # SMB upload + Move-Item to final destination (mirrors _handle_upload_file)
+    await ensure_smb_stage_dir(timeout=30)
+
+    # SMB upload directly to the Windows staging path, relative to the share.
+    smb_script_path = smb_relative_path(remote_path)
     smb_cmd = [
         "smbclient", SMB_SHARE_PATH,
         "-U", "{}%{}".format(FLAREVM_USER, _get_password()),
-        "-c", 'put "{}" "{}"'.format(local_tmp, script_name),
+        "-c", 'put "{}" "{}"'.format(local_tmp, smb_script_path),
     ]
     proc = subprocess.run(smb_cmd, capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
         raise RuntimeError("SMB script upload failed: {}".format(proc.stderr))
-
-    move_cmd = (
-        'New-Item -ItemType Directory -Path "C:\\temp" -Force | Out-Null; '
-        'Move-Item -Path "{src}\\{name}" -Destination "{dst}" -Force'
-    ).format(src=SMB_LOCAL_PATH, name=script_name, dst=remote_path)
-    _, stderr, code = await run_ps_async(move_cmd, timeout=30)
-    if code != 0:
-        raise RuntimeError("Failed to move script into place: {}".format(stderr))
 
     # Cleanup local copy + tempdir
     import shutil
@@ -191,21 +255,26 @@ async def run_ps_script(script, timeout=300, script_name="mcp_script.ps1"):
 # IDA RPC helper
 # ---------------------------------------------------------------------------
 
-async def ida_rpc_call(method, params=None):
+async def ida_rpc_call(method, params=None, timeout=60):
     """JSON-RPC call to IDA MCP on FlareVM port 13337 via WinRM PowerShell."""
     payload = {"jsonrpc": "2.0", "method": method, "id": 1}
     if params:
         payload["params"] = params
     payload_json = json.dumps(payload)
+    web_timeout = max(1, min(timeout, 55))
     ps = (
+        "$ErrorActionPreference = 'Stop'\n"
         "$body = @'\n{}\n'@\n"
         "$resp = Invoke-WebRequest -Uri 'http://127.0.0.1:{}/mcp' "
-        "-Method POST -ContentType 'application/json' -Body $body -UseBasicParsing\n"
+        "-Method POST -ContentType 'application/json' -Body $body "
+        "-UseBasicParsing -TimeoutSec {}\n"
         "$resp.Content"
-    ).format(payload_json, IDA_MCP_PORT)
-    stdout, stderr, code = await run_ps_async(ps, timeout=60)
+    ).format(payload_json, IDA_MCP_PORT, web_timeout)
+    stdout, stderr, code = await run_ps_async(ps, timeout=timeout + 5)
     if code != 0:
         raise RuntimeError("IDA RPC error: {} {}".format(stderr, stdout))
+    if not stdout.strip():
+        raise RuntimeError("IDA RPC returned an empty response")
     return json.loads(stdout)
 
 
@@ -253,6 +322,44 @@ exit 1
         return stdout + "\n" + stdout2
 
     return stdout
+
+
+async def find_gui_process(process_names, command_line_contains=None, timeout=20):
+    """Wait briefly for a GUI process started in the interactive session."""
+    names = ",".join("'{}'".format(name.replace("'", "''")) for name in process_names)
+    command_filter = ""
+    if command_line_contains:
+        command_filter = """
+    if ($proc.CommandLine -notlike "*{needle}*") {{
+        continue
+    }}
+""".format(needle=command_line_contains.replace('"', '`"').replace("'", "''"))
+    ps = """
+$names = @({names})
+$deadline = (Get-Date).AddSeconds({timeout})
+do {{
+    foreach ($name in $names) {{
+        $queryName = $name.Replace("'", "''")
+        $matches = Get-CimInstance Win32_Process -Filter "Name='$queryName'" -ErrorAction SilentlyContinue
+        foreach ($proc in $matches) {{
+{command_filter}
+            [pscustomobject]@{{
+                ProcessId = $proc.ProcessId
+                Name = $proc.Name
+                CommandLine = $proc.CommandLine
+            }} | ConvertTo-Json -Compress
+            exit 0
+        }}
+    }}
+    Start-Sleep -Seconds 1
+}} while ((Get-Date) -lt $deadline)
+Write-Output "NOT_FOUND"
+exit 1
+""".format(names=names, timeout=timeout, command_filter=command_filter)
+    stdout, stderr, code = await run_ps_async(ps, timeout=timeout + 10)
+    if code == 0 and stdout.strip() and stdout.strip() != "NOT_FOUND":
+        return stdout.strip()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -372,9 +479,9 @@ Listener: IRCListener
 async def resolve_tool_path(tool_key, fallback_name=None):
     r"""Find a tool on FlareVM.
 
-    Check the configured path first, then PATH, then recursively search C:\Tools.
-    FlareVM installs are not consistent about directory names, so the recursive
-    fallback is intentionally based on executable names rather than folders.
+    Check PATH first, then the configured path, then recursively search C:\Tools.
+    PATH is preferred because Chocolatey shims and Python script locations tend
+    to track the currently installed version better than old FlareVM folders.
     """
     known = TOOL_PATHS.get(tool_key)
     names = list(TOOL_EXECUTABLES.get(tool_key, []))
@@ -387,11 +494,11 @@ async def resolve_tool_path(tool_key, fallback_name=None):
         ps = """
 $known = "{known}"
 $names = {names}
-if (Test-Path $known) {{ Write-Output $known; exit 0 }}
 foreach ($name in $names) {{
     $p = where.exe $name 2>$null | Select-Object -First 1
     if ($p) {{ Write-Output $p; exit 0 }}
 }}
+if (Test-Path $known) {{ Write-Output $known; exit 0 }}
 foreach ($name in $names) {{
     $p = Get-ChildItem -Path "C:\\Tools" -Filter $name -Recurse -File -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
@@ -853,7 +960,7 @@ async def list_tools():
         # --- GUI Tool Launchers ---
         Tool(
             name="ida_launch_and_wait",
-            description="Launch IDA Pro with a binary and wait for MCP server (port 13337) to be ready.",
+            description="Launch IDA Pro with a binary and briefly probe the MCP server on port 13337.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -900,9 +1007,10 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "function_name": {"type": "string", "description": "Function name or address"},
+                    "address": {"type": "string", "description": "Function address (hex string like 0x401000)"},
+                    "function_name": {"type": "string", "description": "Deprecated alias for address"},
                 },
-                "required": ["function_name"],
+                "required": ["address"],
             },
         ),
         Tool(
@@ -911,9 +1019,10 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "function_name": {"type": "string", "description": "Function name or address"},
+                    "start_address": {"type": "string", "description": "Function start address (hex string like 0x401000)"},
+                    "function_name": {"type": "string", "description": "Deprecated alias for start_address"},
                 },
-                "required": ["function_name"],
+                "required": ["start_address"],
             },
         ),
         Tool(
@@ -947,10 +1056,11 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "old_name": {"type": "string", "description": "Current function name or address"},
+                    "function_address": {"type": "string", "description": "Function address (hex string like 0x401000)"},
+                    "old_name": {"type": "string", "description": "Deprecated alias for function_address"},
                     "new_name": {"type": "string", "description": "New function name"},
                 },
-                "required": ["old_name", "new_name"],
+                "required": ["function_address", "new_name"],
             },
         ),
         # --- Composite Playbooks ---
@@ -1206,11 +1316,15 @@ async def _handle_upload_file(args):
     file_size = os.path.getsize(local_path)
     filename = os.path.basename(local_path)
 
-    # Step 1: SMB put → //FlareVM/KaliShare → C:\Share\<filename>
+    await ensure_smb_stage_dir(timeout=30)
+    stage_path = ntpath.join(SMB_LOCAL_PATH, filename)
+    stage_smb_path = smb_relative_path(stage_path)
+
+    # Step 1: SMB put → configured share staging path (default //FlareVM/C$/temp)
     smb_cmd = [
         "smbclient", SMB_SHARE_PATH,
         "-U", "{}%{}".format(FLAREVM_USER, _get_password()),
-        "-c", 'put "{}" "{}"'.format(local_path, filename),
+        "-c", 'put "{}" "{}"'.format(local_path, stage_smb_path),
     ]
     proc = subprocess.run(smb_cmd, capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
@@ -1218,14 +1332,15 @@ async def _handle_upload_file(args):
 
     # Step 2: Move from share to final destination on FlareVM
     ps_move = """
-$src = "{smb_local}\\{filename}"
+$src = "{stage}"
 $dst = "{remote}"
 $dstDir = [System.IO.Path]::GetDirectoryName($dst)
 if (-not (Test-Path $dstDir)) {{ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }}
-Move-Item -Path $src -Destination $dst -Force
+if ($src -ine $dst) {{
+    Move-Item -Path $src -Destination $dst -Force
+}}
 """.format(
-        smb_local=SMB_LOCAL_PATH,
-        filename=filename,
+        stage=stage_path.replace('"', '`"'),
         remote=remote_path.replace('"', '`"'),
     )
     stdout, stderr, code = await run_ps_async(ps_move, timeout=60)
@@ -1270,10 +1385,21 @@ if (-not (Test-Path $p)) {{ Write-Error "File not found: $p"; exit 1 }}
         return _text("Remote file error: {}\n{}".format(stderr, stdout))
     file_size = int(stdout.strip())
 
+    await ensure_smb_stage_dir(timeout=30)
+
     # Step 2: Stage on the SMB share (Windows path → use ntpath, not os.path)
     filename = ntpath.basename(remote_path)
-    ps_stage = 'Copy-Item -Path "{}" -Destination "{}\\{}" -Force'.format(
-        remote_path.replace('"', '`"'), SMB_LOCAL_PATH, filename
+    stage_path = ntpath.join(SMB_LOCAL_PATH, filename)
+    stage_smb_path = smb_relative_path(stage_path)
+    ps_stage = """
+$src = "{src}"
+$stage = "{stage}"
+if ($src -ine $stage) {{
+    Copy-Item -Path $src -Destination $stage -Force
+}}
+""".format(
+        src=remote_path.replace('"', '`"'),
+        stage=stage_path.replace('"', '`"'),
     )
     stdout, stderr, code = await run_ps_async(ps_stage, timeout=120)
     if code != 0:
@@ -1284,19 +1410,20 @@ if (-not (Test-Path $p)) {{ Write-Error "File not found: $p"; exit 1 }}
     smb_cmd = [
         "smbclient", SMB_SHARE_PATH,
         "-U", "{}%{}".format(FLAREVM_USER, _get_password()),
-        "-c", 'get "{}" "{}"'.format(filename, local_path),
+        "-c", 'get "{}" "{}"'.format(stage_smb_path, local_path),
     ]
     proc = subprocess.run(smb_cmd, capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
         return _text("SMB download failed:\n{}\n{}".format(proc.stderr, proc.stdout))
 
     # Step 4: Cleanup staged copy
-    await run_ps_async(
-        'Remove-Item -Path "{}\\{}" -Force -ErrorAction SilentlyContinue'.format(
-            SMB_LOCAL_PATH, filename
-        ),
-        timeout=15,
-    )
+    if stage_path.lower() != remote_path.lower():
+        await run_ps_async(
+            'Remove-Item -Path "{}" -Force -ErrorAction SilentlyContinue'.format(
+                stage_path.replace('"', '`"')
+            ),
+            timeout=15,
+        )
 
     return _text(
         "Download OK (SMB)\n"
@@ -1413,45 +1540,75 @@ async def _handle_capa_analyze(args):
 # 12. yara_scan
 async def _handle_yara_scan(args):
     file_path = args["file_path"]
-    rules_path = args.get("rules_path", YARA_RULES_PATH)
+    rules_path = args.get("rules_path") or YARA_RULES_PATH
     try:
         yara_path = await resolve_tool_path("yara", "yara64")
     except FileNotFoundError:
         return _text("YARA not found on FlareVM")
 
-    if not rules_path:
-        ps_rules = """
-$candidates = @(
-    "{default_rules}",
-    "C:\\Tools\\yara\\rules",
-    "C:\\Tools\\yara-rules",
-    "C:\\Tools\\YARA\\rules",
-    "C:\\Tools\\YaraRules"
-)
-foreach ($p in $candidates) {
-    if ((Test-Path $p) -and (Get-ChildItem -Path $p -Include *.yar,*.yara -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)) {
-        Write-Output $p
-        exit 0
-    }
-}
-$p = Get-ChildItem -Path "C:\\Tools" -Directory -Recurse -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.Name -match "yara|rule" -and
-        (Get-ChildItem -Path $_.FullName -Include *.yar,*.yara -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
-    } |
-    Select-Object -First 1 -ExpandProperty FullName
-if ($p) { Write-Output $p } else { Write-Output "NOT_FOUND" }
-""".format(default_rules=YARA_RULES_PATH.replace('"', '`"'))
-        rules_stdout, _, _ = await run_ps_async(ps_rules, timeout=30)
-        rules_path = rules_stdout.strip().split("\n")[0].strip()
-        if rules_path == "NOT_FOUND":
-            return _text("YARA rules directory not found under C:\\Tools")
+    ps_validate_rules = """
+$rules = "{rules}"
+if (-not (Test-Path -LiteralPath $rules)) {{
+    Write-Output "MISSING"
+    exit 1
+}}
+$item = Get-Item -LiteralPath $rules -ErrorAction SilentlyContinue
+if ($item.PSIsContainer) {{
+    $ruleFiles = @(Get-ChildItem -Path (Join-Path $rules '*') -Include *.yar,*.yara -Recurse -File -ErrorAction SilentlyContinue)
+    if ($ruleFiles.Count -lt 1) {{
+        Write-Output "EMPTY_DIR"
+        exit 1
+    }}
+    Write-Output "DIR|$($ruleFiles.Count)"
+}} else {{
+    Write-Output "FILE|1"
+}}
+""".format(rules=rules_path.replace('"', '`"'))
+    rules_stdout, _, rules_code = await run_ps_async(ps_validate_rules, timeout=30)
+    rules_status = rules_stdout.strip().split("\n")[0].strip() if rules_stdout.strip() else ""
+    if rules_code != 0:
+        if rules_status == "MISSING":
+            return _text("YARA rules path not found: {}".format(rules_path))
+        if rules_status == "EMPTY_DIR":
+            return _text("YARA rules directory is empty: {}".format(rules_path))
+        return _text("YARA rules path is not usable: {} ({})".format(rules_path, rules_status))
 
-    ps = '& "{yara}" -r "{rules}" "{file}" 2>&1'.format(
-        yara=yara_path,
-        rules=rules_path.replace('"', '`"'),
-        file=file_path.replace('"', '`"'),
-    )
+    if rules_status.startswith("DIR|"):
+        ps = """
+$yara = "{yara}"
+$rules = "{rules}"
+$target = "{file}"
+$ruleFiles = @(Get-ChildItem -Path (Join-Path $rules '*') -Include *.yar,*.yara -Recurse -File -ErrorAction SilentlyContinue)
+$targetItem = Get-Item -LiteralPath $target -ErrorAction SilentlyContinue
+$targetArgs = @()
+if ($targetItem -and $targetItem.PSIsContainer) {{
+    $targetArgs += "-r"
+}}
+$targetArgs += $target
+foreach ($rule in $ruleFiles) {{
+    & $yara $rule.FullName @targetArgs 2>&1
+}}
+""".format(
+            yara=yara_path.replace('"', '`"'),
+            rules=rules_path.replace('"', '`"'),
+            file=file_path.replace('"', '`"'),
+        )
+    else:
+        ps = """
+$yara = "{yara}"
+$rules = "{rules}"
+$target = "{file}"
+$targetItem = Get-Item -LiteralPath $target -ErrorAction SilentlyContinue
+if ($targetItem -and $targetItem.PSIsContainer) {{
+    & $yara $rules -r $target 2>&1
+}} else {{
+    & $yara $rules $target 2>&1
+}}
+""".format(
+            yara=yara_path.replace('"', '`"'),
+            rules=rules_path.replace('"', '`"'),
+            file=file_path.replace('"', '`"'),
+        )
     stdout, stderr, code = await run_ps_async(ps, timeout=180)
     result = "=== YARA Scan ===\nFile: {}\nRules: {}\n\n".format(file_path, rules_path)
     if stdout.strip():
@@ -1638,17 +1795,35 @@ async def _handle_procmon_stop(args):
     procmon_path = await resolve_tool_path("procmon", "Procmon")
 
     ps = """
-# Terminate ProcMon
-& "{procmon}" /Terminate 2>&1 | Out-Null
-Start-Sleep -Seconds 3
+$procmon = "{procmon}"
+$pml = "{pml}"
+$csv = "{csv}"
 
-# Export PML to CSV
-& "{procmon}" /OpenLog "{pml}" /SaveAs "{csv}" /AcceptEula 2>&1 | Out-Null
-Start-Sleep -Seconds 5
+# Terminate ProcMon without letting a stuck GUI process hang WinRM.
+$term = Start-Process -FilePath $procmon -ArgumentList "/Terminate /AcceptEula" -PassThru -WindowStyle Hidden
+if ($term -and -not $term.WaitForExit(10000)) {{
+    Stop-Process -Id $term.Id -Force -ErrorAction SilentlyContinue
+    Write-Output "WARNING: ProcMon terminate command timed out"
+}}
+Start-Sleep -Seconds 2
+
+if (-not (Test-Path -LiteralPath $pml)) {{
+    Write-Output "WARNING: PML file not found at $pml"
+}} else {{
+    # Export PML to CSV with a bounded wait so malformed/locked PML files do not
+    # leave the MCP call blocked indefinitely.
+    $exportArgs = "/OpenLog `"$pml`" /SaveAs `"$csv`" /Quiet /AcceptEula"
+    $export = Start-Process -FilePath $procmon -ArgumentList $exportArgs -PassThru -WindowStyle Hidden
+    if ($export -and -not $export.WaitForExit(45000)) {{
+        Stop-Process -Id $export.Id -Force -ErrorAction SilentlyContinue
+        Write-Output "WARNING: ProcMon CSV export timed out after 45 seconds"
+    }}
+    Start-Sleep -Seconds 2
+}}
 
 # Parse CSV and generate summary
-if (Test-Path "{csv}") {{
-    $lines = Get-Content "{csv}" -TotalCount 10001
+if (Test-Path -LiteralPath $csv) {{
+    $lines = Get-Content $csv -TotalCount 10001
     $total = $lines.Count - 1
     $fileOps = ($lines | Select-String -Pattern "CreateFile|WriteFile|ReadFile|DeleteFile|SetDispositionInformationFile" | Measure-Object).Count
     $regOps = ($lines | Select-String -Pattern "RegOpenKey|RegSetValue|RegQueryValue|RegCreateKey|RegDeleteKey" | Measure-Object).Count
@@ -1656,8 +1831,8 @@ if (Test-Path "{csv}") {{
     $procOps = ($lines | Select-String -Pattern "Process Create|Process Start|Thread Create|Load Image" | Measure-Object).Count
 
     Write-Output "=== ProcMon Summary ==="
-    Write-Output "PML: {pml}"
-    Write-Output "CSV: {csv}"
+    Write-Output "PML: $pml"
+    Write-Output "CSV: $csv"
     Write-Output "Total events (up to 10000): $total"
     Write-Output ""
     Write-Output "--- Operation Breakdown ---"
@@ -1672,8 +1847,8 @@ if (Test-Path "{csv}") {{
     Write-Output "--- Unique Processes ---"
     $procs | ForEach-Object {{ Write-Output "  $_" }}
 }} else {{
-    Write-Output "WARNING: CSV export file not found at {csv}"
-    Write-Output "PML file exists: $(Test-Path '{pml}')"
+    Write-Output "WARNING: CSV export file not found at $csv"
+    Write-Output "PML file exists: $(Test-Path -LiteralPath $pml)"
 }}
 """.format(procmon=procmon_path, pml=pml_path, csv=csv_path)
 
@@ -1690,11 +1865,24 @@ async def _handle_procmon_export_csv(args):
     csv_path = args["csv_path"]
     procmon_path = await resolve_tool_path("procmon", "Procmon")
     ps = """
-& "{procmon}" /OpenLog "{pml}" /SaveAs "{csv}" /AcceptEula 2>&1
-Start-Sleep -Seconds 5
-if (Test-Path "{csv}") {{
-    $size = (Get-Item "{csv}").Length
-    Write-Output "Exported successfully: {csv} ($size bytes)"
+$procmon = "{procmon}"
+$pml = "{pml}"
+$csv = "{csv}"
+if (-not (Test-Path -LiteralPath $pml)) {{
+    Write-Output "Export failed - PML not found: $pml"
+    exit 1
+}}
+$exportArgs = "/OpenLog `"$pml`" /SaveAs `"$csv`" /Quiet /AcceptEula"
+$export = Start-Process -FilePath $procmon -ArgumentList $exportArgs -PassThru -WindowStyle Hidden
+if ($export -and -not $export.WaitForExit(45000)) {{
+    Stop-Process -Id $export.Id -Force -ErrorAction SilentlyContinue
+    Write-Output "Export failed - ProcMon timed out after 45 seconds"
+    exit 1
+}}
+Start-Sleep -Seconds 2
+if (Test-Path -LiteralPath $csv) {{
+    $size = (Get-Item -LiteralPath $csv).Length
+    Write-Output "Exported successfully: $csv ($size bytes)"
 }} else {{
     Write-Output "Export failed - CSV not created"
 }}
@@ -2251,7 +2439,8 @@ if ($w) { Write-Output $w } else { Write-Output "NOT_FOUND" }
 
 # 27. frida_list_processes
 async def _handle_frida_list_processes(args):
-    ps = 'frida-ps 2>&1'
+    frida_ps_path = await resolve_tool_path("frida_ps", "frida-ps")
+    ps = '& "{}" 2>&1'.format(frida_ps_path.replace('"', '`"'))
     stdout, stderr, code = await run_ps_async(ps, timeout=30)
     if code != 0:
         return _text("Frida error: {} {}".format(stderr, stdout))
@@ -2264,7 +2453,8 @@ async def _handle_frida_spawn_and_attach(args):
     script = args["script"]
     timeout = args.get("timeout", 30)
     # Write script to temp file
-    script_escaped = script.replace("'", "''")
+    frida_path = await resolve_tool_path("frida", "frida")
+    script_escaped = script.replace("\r\n'@", "\r\n`'@").replace("\n'@", "\n`'@")
     ps = """
 $scriptContent = @'
 {script}
@@ -2272,9 +2462,9 @@ $scriptContent = @'
 $scriptPath = "C:\\temp\\frida_spawn_script.js"
 $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
 Write-Output "Script saved to $scriptPath"
-$output = & frida -f "{exe}" -l $scriptPath --no-pause --timeout {timeout} 2>&1
+$output = & "{frida}" -f "{exe}" -l $scriptPath -q -t {timeout} 2>&1
 Write-Output $output
-""".format(script=script_escaped, exe=executable.replace('"', '`"'), timeout=timeout)
+""".format(script=script_escaped, frida=frida_path.replace('"', '`"'), exe=executable.replace('"', '`"'), timeout=timeout)
     stdout, stderr, code = await run_ps_async(ps, timeout=timeout + 60)
     result = "=== Frida Spawn & Attach ===\nExecutable: {}\n\n{}".format(executable, stdout)
     if stderr:
@@ -2287,7 +2477,8 @@ async def _handle_frida_attach_pid(args):
     pid = args["pid"]
     script = args["script"]
     timeout = args.get("timeout", 30)
-    script_escaped = script.replace("'", "''")
+    frida_path = await resolve_tool_path("frida", "frida")
+    script_escaped = script.replace("\r\n'@", "\r\n`'@").replace("\n'@", "\n`'@")
     ps = """
 $scriptContent = @'
 {script}
@@ -2295,9 +2486,9 @@ $scriptContent = @'
 $scriptPath = "C:\\temp\\frida_attach_script.js"
 $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
 Write-Output "Script saved to $scriptPath"
-$output = & frida -p {pid} -l $scriptPath --no-pause --timeout {timeout} 2>&1
+$output = & "{frida}" -p {pid} -l $scriptPath -q -t {timeout} 2>&1
 Write-Output $output
-""".format(script=script_escaped, pid=pid, timeout=timeout)
+""".format(script=script_escaped, frida=frida_path.replace('"', '`"'), pid=pid, timeout=timeout)
     stdout, stderr, code = await run_ps_async(ps, timeout=timeout + 60)
     result = "=== Frida Attach (PID: {}) ===\n\n{}".format(pid, stdout)
     if stderr:
@@ -2310,7 +2501,8 @@ async def _handle_frida_run_script(args):
     target = args["target"]
     script = args["script"]
     timeout = args.get("timeout", 30)
-    script_escaped = script.replace("'", "''")
+    frida_path = await resolve_tool_path("frida", "frida")
+    script_escaped = script.replace("\r\n'@", "\r\n`'@").replace("\n'@", "\n`'@")
     # Determine if target is PID (numeric) or process name
     try:
         pid = int(target)
@@ -2324,9 +2516,9 @@ $scriptContent = @'
 '@
 $scriptPath = "C:\\temp\\frida_run_script.js"
 $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
-$output = & frida {target_flag} -l $scriptPath --no-pause --timeout {timeout} 2>&1
+$output = & "{frida}" {target_flag} -l $scriptPath -q -t {timeout} 2>&1
 Write-Output $output
-""".format(script=script_escaped, target_flag=target_flag, timeout=timeout)
+""".format(script=script_escaped, frida=frida_path.replace('"', '`"'), target_flag=target_flag, timeout=timeout)
     stdout, stderr, code = await run_ps_async(ps, timeout=timeout + 60)
     result = "=== Frida Script Execution ===\nTarget: {}\n\n{}".format(target, stdout)
     if stderr:
@@ -2341,7 +2533,7 @@ async def _handle_pe_sieve_scan(args):
     pe_sieve_path = await resolve_tool_path("pe_sieve", "pe-sieve64")
     ps = """
 New-Item -ItemType Directory -Path "{output}" -Force | Out-Null
-$result = & "{tool}" /pid {pid} /dir "{output}" /shellc /iat 3 /data 3 2>&1
+$result = & "{tool}" /pid {pid} /dir "{output}" /shellc 3 /iat 3 /data 3 /imp 3 2>&1
 Write-Output "=== PE-sieve Scan (PID: {pid}) ==="
 Write-Output ""
 Write-Output $result
@@ -2364,7 +2556,7 @@ async def _handle_hollows_hunter_scan(args):
     hh_path = await resolve_tool_path("hollows_hunter", "hollows_hunter64")
     ps = """
 New-Item -ItemType Directory -Path "{output}" -Force | Out-Null
-$result = & "{tool}" /dir "{output}" /shellc /iat 3 2>&1
+$result = & "{tool}" /dir "{output}" /shellc 3 /iat 3 /data 3 2>&1
 Write-Output "=== Hollows Hunter Scan (All Processes) ==="
 Write-Output ""
 Write-Output $result
@@ -2601,22 +2793,66 @@ if ($w) {{ Write-Output $w }} else {{ Write-Output "NOT_FOUND" }}
     if actual_path == "NOT_FOUND":
         return _text("IDA Pro not found on FlareVM. Pass ida_path explicitly.")
 
-    result = await launch_gui_app(
-        actual_path,
-        arguments='"{}"'.format(binary_path),
-        task_name="MCP_IDA",
-        wait_port=IDA_MCP_PORT,
-        wait_timeout=60,
+    db_dir = "C:\\temp\\ida_mcp_dbs"
+    safe_name = "".join(
+        c if c.isalnum() or c in "._-" else "_"
+        for c in ntpath.basename(binary_path)
+    ) or "binary"
+    db_hash = hashlib.sha256(binary_path.encode("utf-8")).hexdigest()[:12]
+    db_path = "{}\\{}_{}_{}.i64".format(
+        db_dir,
+        safe_name,
+        db_hash,
+        time.time_ns(),
     )
 
-    # Try to get initial metadata
+    await run_ps_async(
+        "$ErrorActionPreference = 'Stop'\n"
+        "New-Item -ItemType Directory -Force -Path '{}' | Out-Null\n"
+        "Unblock-File -Path '{}' -ErrorAction SilentlyContinue".format(
+            db_dir.replace("'", "''"),
+            binary_path.replace("'", "''"),
+        ),
+        timeout=15,
+    )
+
+    ida_args = '-A -c -o"{}" "{}"'.format(db_path, binary_path)
+    result = await launch_gui_app(
+        actual_path,
+        arguments=ida_args,
+        task_name="MCP_IDA",
+    )
+    result = "IDA database: {}\n".format(db_path) + result
+
+    process_info = await find_gui_process(
+        ["ida.exe", "ida64.exe"],
+        command_line_contains=binary_path,
+        timeout=20,
+    )
+    if process_info:
+        result += "\nIDA process detected: " + process_info
+    else:
+        result += "\nWARNING: IDA process was not detected after scheduled task launch."
+
+    # Try to get initial metadata without turning a slow/unready IDA MCP plugin
+    # into a launch failure.
     metadata = ""
-    try:
-        meta_result = await ida_rpc_call("get_metadata")
-        if "result" in meta_result:
-            metadata = "\n--- IDA Metadata ---\n" + json.dumps(meta_result["result"], indent=2)
-    except Exception as e:
-        metadata = "\nNote: Could not fetch metadata yet: " + str(e)
+    last_error = None
+    for _ in range(8):
+        try:
+            meta_result = await ida_rpc_call("get_metadata", timeout=5)
+            if "result" in meta_result:
+                metadata = "\n--- IDA Metadata ---\n" + json.dumps(meta_result["result"], indent=2)
+            else:
+                metadata = "\nIDA RPC response: " + json.dumps(meta_result, indent=2)
+            break
+        except Exception as e:
+            last_error = str(e)
+            await asyncio.sleep(3)
+    if not metadata:
+        metadata = (
+            "\nNote: IDA launched, but IDA MCP was not ready on port {} yet: {}"
+        ).format(IDA_MCP_PORT, last_error)
 
     return _text("=== IDA Pro Launched ===\nIDA: {}\nBinary: {}\n{}\n{}".format(
         actual_path, binary_path, result, metadata
@@ -2626,18 +2862,22 @@ if ($w) {{ Write-Output $w }} else {{ Write-Output "NOT_FOUND" }}
 # 37. windbg_launch
 async def _handle_windbg_launch(args):
     dump_file = args["dump_file"]
-    windbg_path = args.get("windbg_path", "C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\windbg.exe")
+    windbg_path = args.get("windbg_path", "C:\\Users\\lucius\\AppData\\Local\\Microsoft\\WindowsApps\\WinDbgX.exe")
 
     # Check if windbg exists at the specified path, try alternatives
     ps_find = """
 $paths = @(
     "{windbg}",
+    "C:\\Users\\lucius\\AppData\\Local\\Microsoft\\WindowsApps\\WinDbgX.exe",
     "C:\\Tools\\WinDbg\\windbg.exe",
-    "C:\\Program Files\\Windows Kits\\10\\Debuggers\\x64\\windbg.exe"
+    "C:\\Program Files\\Windows Kits\\10\\Debuggers\\x64\\windbg.exe",
+    "C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\windbg.exe"
 )
 foreach ($p in $paths) {{ if (Test-Path $p) {{ Write-Output $p; exit 0 }} }}
 $w = where.exe windbg 2>$null | Select-Object -First 1
-if ($w) {{ Write-Output $w }} else {{ Write-Output "NOT_FOUND" }}
+if ($w) {{ Write-Output $w; exit 0 }}
+$wx = where.exe windbgx 2>$null | Select-Object -First 1
+if ($wx) {{ Write-Output $wx }} else {{ Write-Output "NOT_FOUND" }}
 """.format(windbg=windbg_path)
     stdout, _, _ = await run_ps_async(ps_find, timeout=15)
     actual_path = stdout.strip().split("\n")[0].strip()
@@ -2696,20 +2936,29 @@ async def _handle_ida_list_functions(args):
 
 # 40. ida_decompile_function
 async def _handle_ida_decompile_function(args):
-    result = await ida_rpc_call("decompile_function", {"function_name": args["function_name"]})
+    address = args.get("address") or args.get("function_name")
+    if not address:
+        return _text("Missing required argument: address")
+    result = await ida_rpc_call("decompile_function", {"address": address})
     if "result" in result:
         return _text("=== Decompiled: {} ===\n\n{}".format(
-            args["function_name"], result["result"]
+            address, result["result"]
         ))
     return _text("IDA RPC response: " + json.dumps(result, indent=2))
 
 
 # 41. ida_disassemble_function
 async def _handle_ida_disassemble_function(args):
-    result = await ida_rpc_call("disassemble_function", {"function_name": args["function_name"]})
+    start_address = args.get("start_address") or args.get("function_name")
+    if not start_address:
+        return _text("Missing required argument: start_address")
+    result = await ida_rpc_call("disassemble_function", {"start_address": start_address})
     if "result" in result:
+        disasm = result["result"]
+        if not isinstance(disasm, str):
+            disasm = json.dumps(disasm, indent=2)
         return _text("=== Disassembly: {} ===\n\n{}".format(
-            args["function_name"], result["result"]
+            start_address, disasm
         ))
     return _text("IDA RPC response: " + json.dumps(result, indent=2))
 
@@ -2761,12 +3010,15 @@ async def _handle_ida_set_comment(args):
 
 # 44. ida_rename_function
 async def _handle_ida_rename_function(args):
+    function_address = args.get("function_address") or args.get("old_name")
+    if not function_address:
+        return _text("Missing required argument: function_address")
     result = await ida_rpc_call("rename_function", {
-        "old_name": args["old_name"],
+        "function_address": function_address,
         "new_name": args["new_name"],
     })
     if "result" in result:
-        return _text("Function renamed: {} -> {}".format(args["old_name"], args["new_name"]))
+        return _text("Function renamed at {} -> {}".format(function_address, args["new_name"]))
     return _text("IDA RPC response: " + json.dumps(result, indent=2))
 
 
@@ -3231,7 +3483,7 @@ def _prompt_body(name: str, args: dict) -> str:
             "   - `die_analyze` for packer/compiler ID.\n"
             "   - `floss_extract_strings` for stack/decoded strings.\n"
             "   - `capa_analyze` for capability fingerprint.\n"
-            "   - `yara_scan` against C:\\Tools\\yara\\rules.\n"
+            "   - `yara_scan` against C:\\Tools\\yara_rules.\n"
             "4. Search output for IOCs: URLs, IPs, mutexes, registry keys, file paths, flag patterns.\n"
             "5. Produce a triage report: hash, packer, capabilities, suspicious strings, recommended next steps.\n"
         ).format(path=sample)
@@ -3365,7 +3617,7 @@ CHEATSHEET_TEXT = """# FlareVM MCP Cheatsheet
 
 YARA_INDEX_TEXT = """# YARA Rules Index
 
-Default rules directory: `C:\\Tools\\yara\\rules\\`
+Default rules directory: `C:\\Tools\\yara_rules\\`
 
 ## Recommended rule sources
 - Florian Roth signature-base: https://github.com/Neo23x0/signature-base
@@ -3381,7 +3633,7 @@ Default rules directory: `C:\\Tools\\yara\\rules\\`
 - Stealer families (RedLine, Raccoon, Vidar)
 
 ## Use via MCP
-- yara_scan(file_path, rules_dir="C:\\Tools\\yara\\rules") -> matches per rule
+- yara_scan(file_path, rules_dir="C:\\Tools\\yara_rules") -> matches per rule
 """
 
 TOOLS_REFERENCE_TEXT = """# FlareVM Tool Reference
@@ -3391,13 +3643,13 @@ TOOLS_REFERENCE_TEXT = """# FlareVM Tool Reference
 | DIE | C:\\Tools\\die\\diec.exe | Packer / compiler identification |
 | FLOSS | C:\\Tools\\FLOSS\\floss.exe | Stacked / decoded string extraction |
 | CAPA | C:\\Tools\\capa\\capa.exe | Capability fingerprinting |
-| YARA | C:\\Tools\\yara\\yara64.exe | Signature scanning |
-| ProcMon | C:\\Tools\\sysinternals\\Procmon.exe | Behavioral monitoring |
+| YARA | C:\\ProgramData\\chocolatey\\bin\\yara64.exe | Signature scanning |
+| ProcMon | C:\\Tools\\ProcessMonitor\\Procmon64.exe | Behavioral monitoring |
 | Autorunsc | C:\\Tools\\sysinternals\\autorunsc.exe | Persistence enumeration |
-| Strings | C:\\Tools\\sysinternals\\strings.exe | ASCII/Unicode strings |
-| PE-sieve | C:\\Tools\\pe-sieve\\pe-sieve64.exe | In-memory PE anomaly scan |
+| Strings | C:\\Tools\\cygwin\\bin\\strings.exe | ASCII/Unicode strings |
+| PE-sieve | C:\\ProgramData\\chocolatey\\bin\\pe-sieve.exe | In-memory PE anomaly scan |
 | Hollows Hunter | C:\\Tools\\hollows_hunter\\hollows_hunter64.exe | System-wide injection sweep |
-| UPX | C:\\Tools\\upx\\upx.exe | UPX unpack/pack |
+| UPX | C:\\ProgramData\\chocolatey\\bin\\upx.exe | UPX unpack/pack |
 | dnSpy | C:\\Tools\\dnSpy\\dnSpy.Console.exe | .NET decompilation |
 | FakeNet-NG | C:\\Tools\\fakenet\\fakenet.exe | Network sinkhole |
 | NirCmd | C:\\Tools\\nircmd.exe | GUI automation |
@@ -3431,7 +3683,7 @@ async def read_resource(uri):
     if uri_s == "flarevm://docs/yara-rules":
         rules_text = YARA_INDEX_TEXT
         try:
-            ps = r"if (Test-Path 'C:\Tools\yara\rules') { Get-ChildItem -Path 'C:\Tools\yara\rules' -Recurse -Filter *.yar* -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName } else { Write-Output 'NO_RULES_DIR' }"
+            ps = r"if (Test-Path 'C:\Tools\yara_rules') { Get-ChildItem -Path 'C:\Tools\yara_rules' -Recurse -Filter *.yar* -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName } else { Write-Output 'NO_RULES_DIR' }"
             stdout, _, _ = await run_ps_async(ps, timeout=20)
             if stdout and "NO_RULES_DIR" not in stdout:
                 rules_text += "\n## Installed rules\n\n" + stdout
