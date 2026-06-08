@@ -48,7 +48,9 @@ Add this to your MCP client config (~/.claude/.mcp.json or claude_desktop_config
       "args": ["$(pwd)/server.py"],
       "env": {
         "FLAREVM_HOST": "$IP",
-        "FLAREVM_USER": "$USER_"
+        "FLAREVM_USER": "$USER_",
+        "FLAREVM_SMB_SHARE": "C$",
+        "FLAREVM_SMB_LOCAL_PATH": "C:\\temp"
       }
     }
   }
