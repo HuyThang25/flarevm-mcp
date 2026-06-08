@@ -9,15 +9,15 @@ Complete listing of every tool the MCP server invokes, with paths and purpose.
 | **DIE** | `C:\Tools\die\diec.exe` | Detect packer, compiler, language. Output JSON with `-j`. |
 | **FLOSS** | `C:\Tools\FLOSS\floss.exe` | Extract static, stack, decoded, and tight-loop strings. |
 | **CAPA** | `C:\Tools\capa\capa.exe` | Identify program capabilities via rule matching (MITRE ATT&CK). |
-| **YARA** | `C:\Tools\yara\yara64.exe` | Pattern-match samples against rule sets. |
-| **Strings** (Sysinternals) | `C:\Tools\sysinternals\strings.exe` | ASCII / Unicode strings dump. |
+| **YARA** | `C:\ProgramData\chocolatey\bin\yara64.exe` | Pattern-match samples against rule sets. Default rules: `C:\Tools\yara_rules`. |
+| **Strings** | `C:\Tools\cygwin\bin\strings.exe` | ASCII / Unicode strings dump. |
 | **dnSpy console** | `C:\Tools\dnSpy\dnSpy.Console.exe` | Decompile .NET assemblies to C#. |
 
 ## Behavioral / monitoring
 
 | Tool | Path | What it does |
 |------|------|--------------|
-| **ProcMon** | `C:\Tools\sysinternals\Procmon.exe` | Capture process / file / registry / network events to PML. |
+| **ProcMon** | `C:\Tools\ProcessMonitor\Procmon64.exe` | Capture process / file / registry / network events to PML. |
 | **Autorunsc** | `C:\Tools\sysinternals\autorunsc.exe` | Enumerate every persistence location on Windows. |
 | **FakeNet-NG** | `C:\Tools\fakenet\fakenet.exe` | Sinkhole DNS, HTTP, HTTPS; respond with canned content. |
 | **TShark** | `C:\ProgramData\chocolatey\bin\tshark.exe` | CLI Wireshark; capture and dissect PCAP. |
@@ -27,14 +27,14 @@ Complete listing of every tool the MCP server invokes, with paths and purpose.
 
 | Tool | Path | What it does |
 |------|------|--------------|
-| **PE-sieve** | `C:\Tools\pe-sieve\pe-sieve64.exe` | Scan a process for in-memory PE anomalies; dump implants. |
+| **PE-sieve** | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` | Scan a process for in-memory PE anomalies; dump implants. |
 | **Hollows Hunter** | `C:\Tools\hollows_hunter\hollows_hunter64.exe` | System-wide PE-sieve sweep. |
 
 ## Unpacking / debugging
 
 | Tool | Path | What it does |
 |------|------|--------------|
-| **UPX** | `C:\Tools\upx\upx.exe` | Pack / unpack UPX-compressed binaries. |
+| **UPX** | `C:\ProgramData\chocolatey\bin\upx.exe` | Pack / unpack UPX-compressed binaries. |
 | **x64dbg** | `C:\ProgramData\chocolatey\bin\x64dbg.exe` | x86/x64 ring-3 debugger (GUI). |
 | **NirCmd** | `C:\Tools\nircmd.exe` | GUI automation helper (close windows, send keys). |
 
