@@ -7,7 +7,7 @@ upload_file kali_path=/tmp/sample.bin remote_path=C:\temp\sample.bin
 die_analyze C:\temp\sample.bin
 floss_extract_strings C:\temp\sample.bin --min 6
 capa_analyze C:\temp\sample.bin
-yara_scan C:\temp\sample.bin --rules C:\Tools\yara\rules
+yara_scan C:\temp\sample.bin --rules C:\Tools\yara_rules
 ```
 
 ## Detonation
@@ -56,7 +56,7 @@ dnspy_decompile C:\temp\sample.exe --output C:\temp\src
 
 ## YARA
 ```
-yara_scan <file> --rules <dir>          # default: C:\Tools\yara\rules
+yara_scan <file> --rules <dir>          # default: C:\Tools\yara_rules
 ```
 
 ## Common tool flags
